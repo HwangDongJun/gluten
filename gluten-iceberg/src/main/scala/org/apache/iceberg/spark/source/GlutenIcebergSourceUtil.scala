@@ -161,20 +161,20 @@ object GlutenIcebergSourceUtil {
    * Derives both the file format and, optionally, the root path(s) actually scanned from the
    * planned Iceberg scan tasks in a single pass over `getScanTasks(sparkScan)`.
    *
-   * Root paths are derived from the real per-file (and, when present, per-delete-file) paths
-   * rather than table metadata (Table.location() / write.data.path), since data files can live
-   * at a location the static metadata does not reflect (e.g. after write.data.path is changed
-   * without moving previously-written files). One representative path per distinct scheme
-   * prefix is kept, since callers only need this to validate that the native filesystem
-   * implementation supports every scheme in play, not to enumerate every file.
+   * Root paths are derived from the real per-file (and, when present, per-delete-file) paths rather
+   * than table metadata (Table.location() / write.data.path), since data files can live at a
+   * location the static metadata does not reflect (e.g. after write.data.path is changed without
+   * moving previously-written files). One representative path per distinct scheme prefix is kept,
+   * since callers only need this to validate that the native filesystem implementation supports
+   * every scheme in play, not to enumerate every file.
    *
    * NOTE: this deliberately reuses the same `getScanTasks(sparkScan)` (Iceberg's own
-   * SparkPartitioningAwareScan#tasks()) that `getReadPartitionSchema` already calls
-   * unconditionally from `doValidateInternal()`, not Spark's
-   * BatchScanExecShim#filteredPartitions (which additionally calls
-   * SupportsRuntimeV2Filtering#filter() and Scan#toBatch().planInputPartitions(), and was the
-   * root cause of the DPP regression from https://github.com/apache/gluten/issues/12712 when a
-   * prior revision of this fix read paths from BatchScanExecTransformerBase#finalPartitions).
+   * SparkPartitioningAwareScan#tasks()) that `getReadPartitionSchema` already calls unconditionally
+   * from `doValidateInternal()`, not Spark's BatchScanExecShim#filteredPartitions (which
+   * additionally calls SupportsRuntimeV2Filtering#filter() and
+   * Scan#toBatch().planInputPartitions(), and was the root cause of the DPP regression from
+   * https://github.com/apache/gluten/issues/12712 when a prior revision of this fix read paths from
+   * BatchScanExecTransformerBase#finalPartitions).
    */
   def getFileFormatAndRootPaths(
       sparkScan: Scan,
