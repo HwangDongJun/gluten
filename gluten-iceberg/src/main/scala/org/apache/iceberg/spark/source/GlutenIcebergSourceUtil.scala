@@ -37,7 +37,6 @@ import java.util.{ArrayList => JArrayList, HashMap => JHashMap, List => JList, M
 import java.util.Locale
 
 import scala.collection.JavaConverters._
-import scala.collection.mutable.LinkedHashMap
 
 object GlutenIcebergSourceUtil {
   private val InputFileNameCol = "input_file_name"
@@ -180,12 +179,19 @@ object GlutenIcebergSourceUtil {
       sparkScan: Scan,
       collectRootPaths: Boolean): (ReadFileFormat, Seq[String]) = {
     var fileFormat: ReadFileFormat = ReadFileFormat.UnknownFormat
-    val rootPathsByScheme = LinkedHashMap.empty[String, String]
+    // Built with plain mutable local collections that are never returned or captured, then
+    // copied into an immutable Seq at the end: the result is cached in a `lazy val` on
+    // IcebergScanTransformer (a case class captured by Spark task closures), so it must not
+    // retain any reference to a non-serializable mutable collection.
+    val seenSchemes = scala.collection.mutable.HashSet.empty[String]
+    val rootPathsBuilder = Seq.newBuilder[String]
 
     def recordPath(path: String): Unit = {
       if (collectRootPaths) {
         val scheme = Option(new URI(path).getScheme).getOrElse("")
-        rootPathsByScheme.getOrElseUpdate(scheme, path)
+        if (seenSchemes.add(scheme)) {
+          rootPathsBuilder += path
+        }
       }
     }
 
@@ -207,7 +213,7 @@ object GlutenIcebergSourceUtil {
     if (fileFormat == ReadFileFormat.UnknownFormat) {
       throw new GlutenNotSupportException("Iceberg Only support parquet and orc file format.")
     }
-    (fileFormat, rootPathsByScheme.values.toSeq)
+    (fileFormat, rootPathsBuilder.result())
   }
 
   def getReadPartitionSchema(sparkScan: Scan): StructType = {
