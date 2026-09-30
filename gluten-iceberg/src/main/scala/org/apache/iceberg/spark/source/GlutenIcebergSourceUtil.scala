@@ -32,7 +32,6 @@ import org.apache.iceberg._
 import org.apache.iceberg.spark.SparkSchemaUtil
 
 import java.lang.{Long => JLong}
-import java.net.URI
 import java.util.{ArrayList => JArrayList, HashMap => JHashMap, List => JList, Map => JMap}
 import java.util.Locale
 
@@ -188,7 +187,12 @@ object GlutenIcebergSourceUtil {
 
     def recordPath(path: String): Unit = {
       if (collectRootPaths) {
-        val scheme = Option(new URI(path).getScheme).getOrElse("")
+        // Extract just the scheme prefix (e.g. "s3://", "hdfs://") without going through
+        // java.net.URI, whose strict RFC 3986 parsing throws URISyntaxException on file paths
+        // containing characters like spaces or '[' / ']' that Hadoop-style paths otherwise
+        // tolerate (e.g. from a partition value with a space in it).
+        val schemeSeparator = path.indexOf("://")
+        val scheme = if (schemeSeparator >= 0) path.substring(0, schemeSeparator) else ""
         if (seenSchemes.add(scheme)) {
           rootPathsBuilder += path
         }
