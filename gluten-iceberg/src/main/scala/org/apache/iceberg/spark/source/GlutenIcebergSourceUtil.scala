@@ -23,13 +23,12 @@ import org.apache.gluten.execution.SparkDataSourceRDDPartition
 import org.apache.gluten.substrait.rel.{IcebergLocalFilesBuilder, SplitInfo}
 import org.apache.gluten.substrait.rel.LocalFilesNode.ReadFileFormat
 
-import org.apache.hadoop.fs.Path
-
 import org.apache.spark.softaffinity.SoftAffinity
 import org.apache.spark.sql.catalyst.catalog.ExternalCatalogUtils
 import org.apache.spark.sql.connector.read.Scan
 import org.apache.spark.sql.types.StructType
 
+import org.apache.hadoop.fs.Path
 import org.apache.iceberg._
 import org.apache.iceberg.spark.SparkSchemaUtil
 
