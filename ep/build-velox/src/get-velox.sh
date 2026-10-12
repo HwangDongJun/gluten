@@ -18,8 +18,8 @@ set -exu
 
 CURRENT_DIR=$(cd "$(dirname "$BASH_SOURCE")"; pwd)
 VELOX_REPO=https://github.com/IBM/velox.git
-VELOX_BRANCH=dft-2026_08_17
-VELOX_ENHANCED_BRANCH=ibm-2026_08_17
+VELOX_BRANCH=dft-2026_10_10
+VELOX_ENHANCED_BRANCH=ibm-2026_10_10
 VELOX_HOME=""
 RUN_SETUP_SCRIPT=ON
 ENABLE_ENHANCED_FEATURES=OFF
@@ -152,16 +152,6 @@ function apply_provided_velox_patch {
   fi
 }
 
-function apply_compilation_fixes {
-  local SUDO_CMD=""
-  if [ "$OS" == "Linux" ] && [ "${EUID:-$(id -u)}" -ne 0 ]; then
-    SUDO_CMD="sudo"
-  fi
-  $SUDO_CMD cp ${CURRENT_DIR}/modify_arrow.patch ${VELOX_HOME}/CMake/resolve_dependency_modules/arrow/
-
-  git add ${VELOX_HOME}/CMake/resolve_dependency_modules/arrow/modify_arrow.patch # to avoid the file from being deleted by git clean -dffx :/
-}
-
 # Adds an 'hive.s3.ssl.ca-file' config (falling back to the SSL_CERT_FILE env
 # var) so the S3 client's TLS CA bundle path can be overridden at runtime
 # instead of relying solely on the HTTP client's compiled-in default path.
@@ -261,7 +251,5 @@ fi
 apply_provided_velox_patch
 
 apply_s3_ssl_ca_override_patch
-
-apply_compilation_fixes
 
 echo "Finished getting Velox code"

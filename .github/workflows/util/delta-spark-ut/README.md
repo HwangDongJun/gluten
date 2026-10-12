@@ -43,6 +43,7 @@ starts failing** (a regression).
 | `run-delta-tests.sh` | The shard step's body: runs `sbt spark/test` (tuned JVM/heap flags) under a hang watchdog, prints memory forensics, then gates the results against the baseline via `compare-test-results.py`. |
 | `java-test-args.sh` | Shared JVM flags (`--add-opens` + Netty property) needed to run the suite on JDK 17 with the Gluten bundle. Sourced by `run-delta-tests.sh` and by local runs. |
 | `setup-delta.sh` | Clones Delta, drops in the Gluten bundle, and patches `DeltaSQLCommandTest`. |
+| `apply-delta-test-patches.sh` | Applies temporary Delta test workarounds: upstream scan fixes, deterministic Parquet row groups, and 2B-row DV fail-fast patches. Called by `setup-delta.sh` with `<delta_ref> <delta_dir>`. |
 
 ## How the gate works
 
@@ -86,8 +87,10 @@ no longer carries the Delta suite.
 The tradeoff: `gluten-delta/**` and `backends-velox/src-delta*/**` also match
 `velox_backend_x86.yml`'s own filter (its spark-ut jobs build with `-Pdelta`), so
 a change there runs **both** workflows — and because the native library is no
-longer shared between them, those PRs pay for the centos-7 native build twice
-(~10 min). That is the price of decoupling the two pipelines.
+longer shared between them, those PRs pay for two independent native builds.
+Both use the AlmaLinux 8 / GCC 13 vcpkg builder; Delta's downstream bundle and
+test jobs run on CentOS 9. The Delta workflow retains native dependency logs as
+an artifact if its build fails. That is the price of decoupling the two pipelines.
 
 - **Per PR** — the workflow's own `paths:` filter runs the suite only when the PR
   touches a **high-signal Delta path**: the Delta integration code
@@ -103,6 +106,12 @@ longer shared between them, those PRs pay for the centos-7 native build twice
   still caught daily. The nightly run enforces the baseline **and** fails on
   now-passing tests (`fail_on_fixed=true`), so baseline drift surfaces as a red
   nightly — the signal to refresh `known-failures.txt`.
+- **On demand, from a PR** — anyone can comment **`/delta-test`** as the first
+  token to run the default configuration against the PR merge ref. This covers
+  PRs skipped by `paths:` without requiring label permissions. The workflow
+  posts the run link on the PR and enforces the committed baseline. Comment runs
+  restore but never save main-scoped Stash caches; use `workflow_dispatch` for
+  custom inputs or baseline updates.
 - **Manually** — **Actions → Delta Spark UT (Gluten) → Run workflow**
   (`workflow_dispatch`), e.g. to refresh the baseline (see below). This is also
   how you validate a Velox/core change against Delta before merging: run it on
@@ -176,10 +185,10 @@ and blank lines allowed:
 ### Quarantine by error signature
 
 Some bugs surface on a **different test each run** — for example the native Delta
-DV bitmap row-index error (the aggregator gets a garbage row index during a MERGE
-that writes deletion vectors and aborts, e.g. `Delta RoaringBitmapArray row index
+DV bitmap row-index error (the aggregator got a garbage row index during a MERGE
+that writes deletion vectors and aborted, e.g. `Delta RoaringBitmapArray row index
 ... exceeds max representable value` or `Delta bitmap row index cannot be
-negative: ...`) lands on a different `*DVs*Suite` MERGE test every time. Chasing
+negative: ...`) landed on a different `*DVs*Suite` MERGE test every time. Chasing
 those by name is whack-a-mole, so quarantine them by **root cause** in
 **`flaky-error-patterns.txt`** instead: each line is a regex matched against a
 failed test's `<failure>`/`<error>` text. Any failure that matches is treated as
@@ -187,11 +196,20 @@ flaky regardless of which test it hit (and is dropped from the shard's failures
 list so it can't leak into the baseline):
 
 ```
+# HISTORICAL EXAMPLE -- no longer active; flaky-error-patterns.txt has no
+# entries. Do not copy these back in: the bug they matched is fixed.
 # regex matched against the failure message + stack (enforce mode).
 # one explicit pattern per known error, deliberately specific.
 Delta RoaringBitmapArray row index \d+ exceeds max representable value
-Delta bitmap row index cannot be negative: -?\d+
+Delta bitmap row index cannot be negative: -\d+
 ```
+
+The root cause was a Velox scan bug
+([velox#18535](https://github.com/facebookincubator/velox/issues/18535)), fixed
+by [velox#18536](https://github.com/facebookincubator/velox/pull/18536) and
+picked up by the `dft-2026_08_21` Velox pin, so both patterns were removed and
+the suite is enforced again. The example is kept because it shows the shape of
+the mechanism.
 
 This is more precise than a name glob: a *different* real failure in the same
 suite is still caught, because only failures carrying the signature are ignored.

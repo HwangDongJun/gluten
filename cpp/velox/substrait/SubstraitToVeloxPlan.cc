@@ -35,6 +35,7 @@
 #include "utils/VeloxArrowUtils.h"
 #include "utils/VeloxWriterUtils.h"
 
+#include "RequiredSubfieldsExtension.pb.h"
 #include "config.pb.h"
 #include "config/GlutenConfig.h"
 #include "config/VeloxConfig.h"
@@ -596,6 +597,7 @@ core::PlanNodePtr SubstraitToVeloxPlanConverter::toVeloxPlan(const ::substrait::
       if (substraitAggMask.ByteSizeLong() > 0) {
         mask = std::dynamic_pointer_cast<const core::FieldAccessTypedExpr>(
             exprConverter_->toVeloxExpr(substraitAggMask, inputType));
+        VELOX_USER_CHECK(mask && mask->isInputColumn(), "Aggregation Operator only supports a top-level field mask.");
       }
     }
     const auto& aggFunction = measure.measure();
@@ -903,7 +905,8 @@ core::PlanNodePtr SubstraitToVeloxPlanConverter::toVeloxPlan(const ::substrait::
           makeLocationHandle(writePath, fileName, fileFormat, compressionKind, bucketProperty != nullptr),
           writerOptions,
           fileFormat,
-          compressionKind));
+          compressionKind),
+      folly::F14FastSet<std::string>{});
   return std::make_shared<core::TableWriteNode>(
       nextPlanNodeId(),
       inputType,
@@ -935,7 +938,13 @@ core::PlanNodePtr SubstraitToVeloxPlanConverter::toVeloxPlan(const ::substrait::
 
     for (const auto& projectExpr : projections.switching_field().duplicates()) {
       if (projectExpr.has_selection()) {
-        auto expression = exprConverter_->toVeloxExpr(projectExpr.selection(), inputType);
+        VELOX_USER_CHECK(
+            SubstraitParser::isTopLevelFieldSelection(projectExpr),
+            "Expand Operator only supports a top-level field or literal.");
+        auto expression = std::dynamic_pointer_cast<const core::FieldAccessTypedExpr>(
+            exprConverter_->toVeloxExpr(projectExpr, inputType));
+        VELOX_USER_CHECK(
+            expression && expression->isInputColumn(), "Expand Operator only supports a top-level field or literal.");
         projectExprs.emplace_back(expression);
       } else if (projectExpr.has_literal()) {
         auto expression = exprConverter_->toVeloxExpr(projectExpr.literal());
@@ -1065,7 +1074,7 @@ core::PlanNodePtr SubstraitToVeloxPlanConverter::toVeloxPlan(const ::substrait::
     unnest.emplace_back(unnestFieldExpr);
   }
 
-  std::vector<std::string> unnestNames;
+  std::vector<std::optional<std::string>> unnestNames;
   int unnestIndex = 0;
   for (const auto& variable : unnest) {
     if (variable->type()->isArray()) {
@@ -1558,17 +1567,20 @@ core::PlanNodePtr SubstraitToVeloxPlanConverter::toVeloxPlan(const ::substrait::
   std::vector<std::string> colNameList;
   std::vector<TypePtr> veloxTypeList;
   std::vector<ColumnType> columnTypes;
-  // Convert field names into lower case when not case-sensitive.
+  // Convert field names into lower case when not case-sensitive. Every name that has to match a
+  // scan column (schema names, required-subfield column and field names) goes through foldCase.
   bool asLowerCase = !veloxCfg_->get<bool>(kCaseSensitive, false);
+  auto foldCase = [asLowerCase](std::string name) {
+    if (asLowerCase) {
+      folly::toLowerAscii(name);
+    }
+    return name;
+  };
   if (readRel.has_base_schema()) {
     const auto& baseSchema = readRel.base_schema();
     colNameList.reserve(baseSchema.names().size());
     for (const auto& name : baseSchema.names()) {
-      std::string fieldName = name;
-      if (asLowerCase) {
-        folly::toLowerAscii(fieldName);
-      }
-      colNameList.emplace_back(fieldName);
+      colNameList.emplace_back(foldCase(name));
     }
     veloxTypeList = SubstraitParser::parseNamedStruct(baseSchema, asLowerCase);
     SubstraitParser::parseColumnTypes(baseSchema, columnTypes);
@@ -1624,6 +1636,52 @@ core::PlanNodePtr SubstraitToVeloxPlanConverter::toVeloxPlan(const ::substrait::
   tableHandle = std::make_shared<connector::hive::HiveTableHandle>(
       connectorId, "hive_table", std::move(subfieldFilters), remainingFilter, dataColumns);
 
+  // Required subfields of scan columns (map-key pruning), from the RequiredSubfieldsExtension the
+  // ScanMapKeyPruning rule packs into the ReadRel advanced extension. Each path is transported as
+  // structured elements and rebuilt as a common::Subfield here, so no path syntax is parsed.
+  std::unordered_map<std::string, std::vector<common::Subfield>> requiredSubfieldsByCol;
+  if (readRel.has_advanced_extension() && readRel.advanced_extension().has_enhancement()) {
+    const auto& enhancement = readRel.advanced_extension().enhancement();
+    if (enhancement.Is<gluten::RequiredSubfieldsExtension>()) {
+      gluten::RequiredSubfieldsExtension extension;
+      VELOX_USER_CHECK(enhancement.UnpackTo(&extension), "Failed to unpack RequiredSubfieldsExtension");
+      for (const auto& column : extension.columns()) {
+        auto columnName = foldCase(column.column());
+        VELOX_USER_CHECK(!columnName.empty(), "Required subfields with an empty column name");
+        std::vector<common::Subfield> subfields;
+        for (const auto& subfield : column.subfields()) {
+          std::vector<std::unique_ptr<common::Subfield::PathElement>> elements;
+          elements.push_back(std::make_unique<common::Subfield::NestedField>(columnName));
+          for (const auto& element : subfield.elements()) {
+            using PathElement = gluten::RequiredSubfieldsExtension::PathElement;
+            switch (element.element_case()) {
+              case PathElement::kField: {
+                // Same folding as the schema's field names, or the field would resolve to nothing
+                // and read as null.
+                auto fieldName = foldCase(element.field());
+                VELOX_USER_CHECK(!fieldName.empty(), "Required subfield with an empty field name");
+                elements.push_back(std::make_unique<common::Subfield::NestedField>(fieldName));
+                break;
+              }
+              case PathElement::kStringKey:
+                elements.push_back(std::make_unique<common::Subfield::StringSubscript>(element.string_key()));
+                break;
+              case PathElement::kLongKey:
+                elements.push_back(std::make_unique<common::Subfield::LongSubscript>(element.long_key()));
+                break;
+              default:
+                VELOX_USER_FAIL("Required subfield of column {} has an element without a value", columnName);
+            }
+          }
+          subfields.emplace_back(std::move(elements));
+        }
+        if (!subfields.empty()) {
+          requiredSubfieldsByCol[columnName] = std::move(subfields);
+        }
+      }
+    }
+  }
+
   // Get assignments and out names.
   std::vector<std::string> outNames;
   outNames.reserve(colNameList.size());
@@ -1639,9 +1697,7 @@ core::PlanNodePtr SubstraitToVeloxPlanConverter::toVeloxPlan(const ::substrait::
         icebergColumn = &columnIt->second;
       } else if (asLowerCase) {
         for (const auto& [name, column] : icebergSplitInfo->columns) {
-          auto normalizedName = name;
-          folly::toLowerAscii(normalizedName);
-          if (normalizedName == colNameList[idx]) {
+          if (foldCase(name) == colNameList[idx]) {
             icebergColumn = &column;
             break;
           }
@@ -1652,6 +1708,8 @@ core::PlanNodePtr SubstraitToVeloxPlanConverter::toVeloxPlan(const ::substrait::
     // handles only for regular columns so all data columns are mapped by field
     // ID together, while partition columns keep the existing Hive conversion.
     if (icebergColumn && columnType == ColumnType::kRegular) {
+      // Iceberg scans do not declare required subfields (the Scala side does not prune them); a
+      // declaration reaching this branch is left unused and reported below.
       assignments[outName] = std::make_shared<connector::hive::iceberg::IcebergColumnHandle>(
           colNameList[idx],
           columnType,
@@ -1660,10 +1718,26 @@ core::PlanNodePtr SubstraitToVeloxPlanConverter::toVeloxPlan(const ::substrait::
           std::vector<common::Subfield>{},
           icebergColumn->initialDefault);
     } else {
+      std::vector<common::Subfield> requiredSubfields;
+      if (columnType == ColumnType::kRegular && !requiredSubfieldsByCol.empty()) {
+        auto it = requiredSubfieldsByCol.find(colNameList[idx]);
+        if (it != requiredSubfieldsByCol.end()) {
+          VLOG(1) << "Map-key pruning: applying " << it->second.size() << " required subfields to column "
+                  << colNameList[idx];
+          requiredSubfields = std::move(it->second);
+          requiredSubfieldsByCol.erase(it);
+        }
+      }
       assignments[outName] = std::make_shared<connector::hive::HiveColumnHandle>(
-          colNameList[idx], columnType, veloxTypeList[idx], veloxTypeList[idx]);
+          colNameList[idx], columnType, veloxTypeList[idx], veloxTypeList[idx], std::move(requiredSubfields));
     }
     outNames.emplace_back(outName);
+  }
+  // A declared column that matched no regular scan column is not applied; the column is then read
+  // whole, which is correct but not what the plan asked for.
+  for (const auto& [columnName, subfields] : requiredSubfieldsByCol) {
+    LOG(WARNING) << "Map-key pruning: " << subfields.size() << " required subfields declared for column '" << columnName
+                 << "' matched no scan column and were ignored";
   }
   auto outputType = ROW(std::move(outNames), std::move(veloxTypeList));
 
@@ -1681,26 +1755,23 @@ core::PlanNodePtr SubstraitToVeloxPlanConverter::toVeloxPlan(const ::substrait::
 core::PlanNodePtr SubstraitToVeloxPlanConverter::toVeloxPlan(
     const ::substrait::ReadRel& readRel,
     const RowTypePtr& type) {
-  ::substrait::ReadRel_VirtualTable readVirtualTable = readRel.virtual_table();
-  int64_t numVectors = readVirtualTable.values_size();
-  int64_t numColumns = type->size();
-  int64_t valueFieldNums = readVirtualTable.values(numVectors - 1).fields_size();
+  const ::substrait::ReadRel_VirtualTable& readVirtualTable = readRel.virtual_table();
+  const int64_t numVectors = readVirtualTable.expressions_size();
+  const int64_t numColumns = type->size();
   std::vector<RowVectorPtr> vectors;
   vectors.reserve(numVectors);
 
-  int64_t batchSize;
-  // For the empty vectors, eg,vectors = makeRowVector(ROW({}, {}), 1).
-  if (numColumns == 0) {
-    batchSize = 1;
-  } else {
-    batchSize = valueFieldNums / numColumns;
-  }
-
   for (int64_t index = 0; index < numVectors; ++index) {
     std::vector<VectorPtr> children;
-    ::substrait::Expression_Literal_Struct rowValue = readRel.virtual_table().values(index);
-    auto fieldSize = rowValue.fields_size();
-    VELOX_CHECK_EQ(fieldSize, batchSize * numColumns);
+    // Each Nested.Struct holds one row group, laid out column-major. Row groups need not all
+    // carry the same number of rows, so derive the batch size per struct rather than once for
+    // the whole table.
+    const ::substrait::Expression_Nested_Struct& rowValue = readVirtualTable.expressions(index);
+    const int64_t fieldSize = rowValue.fields_size();
+    // For the empty vectors, eg,vectors = makeRowVector(ROW({}, {}), 1).
+    const int64_t batchSize = numColumns == 0 ? 1 : fieldSize / numColumns;
+    VELOX_USER_CHECK_EQ(
+        fieldSize, batchSize * numColumns, "ReadRel.VirtualTable field count must be a multiple of the column count.");
 
     for (int64_t col = 0; col < numColumns; ++col) {
       const TypePtr& outputChildType = type->childAt(col);
@@ -1709,7 +1780,12 @@ core::PlanNodePtr SubstraitToVeloxPlanConverter::toVeloxPlan(
       for (int64_t batchId = 0; batchId < batchSize; batchId++) {
         // each value in the batch
         auto fieldIdx = col * batchSize + batchId;
-        ::substrait::Expression_Literal field = rowValue.fields(fieldIdx);
+        // Substrait models virtual table values as Expressions; Gluten only ever emits literals,
+        // so unwrap back to the Literal the downstream conversion expects. This converter is also
+        // reachable from the JSON-plan test and benchmark paths, so reject anything else loudly.
+        const ::substrait::Expression& fieldExpr = rowValue.fields(fieldIdx);
+        VELOX_USER_CHECK(fieldExpr.has_literal(), "ReadRel.VirtualTable expressions must be literals.");
+        const ::substrait::Expression_Literal& field = fieldExpr.literal();
 
         auto expr = exprConverter_->toVeloxExpr(field);
         if (auto constantExpr = std::dynamic_pointer_cast<const core::ConstantTypedExpr>(expr)) {
