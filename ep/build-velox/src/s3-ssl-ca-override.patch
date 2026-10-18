@@ -43,7 +43,7 @@
  #include <memory>
  #include <stdexcept>
  
-@@ -239,6 +241,34 @@ class S3FileSystem::Impl {
+@@ -239,6 +241,39 @@ class S3FileSystem::Impl {
          Aws::Client::RequestChecksumCalculation::WHEN_REQUIRED;
      clientConfig.checksumConfig.responseChecksumValidation =
          Aws::Client::ResponseChecksumValidation::WHEN_REQUIRED;
@@ -59,18 +59,23 @@
 +    // variable convention (also respected by OpenSSL, the curl CLI,
 +    // Python, Node.js, etc.), so a runtime image only needs to set one
 +    // environment variable to point at its actual CA bundle location,
-+    // without requiring a Velox/Spark config change. SSL_CERT_FILE is only
-+    // used if it points to an existing regular file; a stale value is
-+    // ignored so it cannot break TLS where the compiled-in default path
-+    // works.
-+    if (s3Config_->sslCAFile().has_value()) {
-+      clientConfig.caFile = awsString(s3Config_->sslCAFile().value());
-+    } else if (const char* envCAFile = std::getenv("SSL_CERT_FILE")) {
++    // without requiring a Velox/Spark config change. A value that does not
++    // point to an existing regular file is ignored with a warning, so a
++    // stale path cannot break TLS where the compiled-in default works.
++    std::optional<std::string> caFile = s3Config_->sslCAFile();
++    const char* caFileSource = "hive.s3.ssl.ca-file";
++    if (!caFile.has_value()) {
++      if (const char* envCAFile = std::getenv("SSL_CERT_FILE")) {
++        caFile = envCAFile;
++        caFileSource = "SSL_CERT_FILE";
++      }
++    }
++    if (caFile.has_value()) {
 +      std::error_code ec;
-+      if (std::filesystem::is_regular_file(envCAFile, ec) && !ec) {
-+        clientConfig.caFile = envCAFile;
++      if (std::filesystem::is_regular_file(caFile.value(), ec) && !ec) {
++        clientConfig.caFile = awsString(caFile.value());
 +      } else {
-+        LOG(WARNING) << "Ignoring SSL_CERT_FILE='" << envCAFile
++        LOG(WARNING) << "Ignoring " << caFileSource << "='" << caFile.value()
 +                     << "': not an existing regular file.";
 +      }
 +    }

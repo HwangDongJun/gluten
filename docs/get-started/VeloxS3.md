@@ -125,10 +125,11 @@ Either setting is passed through to `Aws::Client::ClientConfiguration::caFile`, 
 mechanism for overriding the TLS CA bundle (it flows through to libcurl's `CURLOPT_CAINFO`). If neither is set,
 Velox falls back to the HTTP client's compiled-in default path, preserving existing behavior.
 
-`SSL_CERT_FILE` is only honored if it points to an existing regular file. Otherwise it is ignored with a warning
-and the compiled-in default path is used, so a stale value does not affect environments that already work. A path
-set explicitly via `spark.hadoop.fs.s3a.ssl.ca-file` is used as given, so make sure that file exists on every
-executor.
+The configured path, whether from `spark.hadoop.fs.s3a.ssl.ca-file` or `SSL_CERT_FILE`, is only used if it points
+to an existing regular file. Otherwise it is ignored with a warning in the executor log and the compiled-in default
+path is used, so a stale value does not affect environments that already work. When both are set,
+`spark.hadoop.fs.s3a.ssl.ca-file` takes precedence, even if the file it points to does not exist. Make sure the
+file exists on every executor.
 
 # Local Caching support
 

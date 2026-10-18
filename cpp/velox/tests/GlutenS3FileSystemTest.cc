@@ -67,5 +67,26 @@ TEST(GlutenS3FileSystemTest, extractsAsyncUploadConfigs) {
   EXPECT_EQ(hiveConfig->get<std::string>("hive.s3.upload-threads"), "32");
 }
 
+TEST(GlutenS3FileSystemTest, extractsSslCaFileConfig) {
+  auto config = std::make_shared<velox::config::ConfigBase>(
+      std::unordered_map<std::string, std::string>{{"spark.hadoop.fs.s3a.ssl.ca-file", "/etc/ssl/certs/ca-bundle.pem"}});
+
+  const auto hiveConfig = createHiveConnectorConfig(config, FileSystemType::kS3);
+
+  EXPECT_EQ(
+      hiveConfig->get<std::string>(filesystems::S3Config::baseConfigKey(filesystems::S3Config::Keys::kSSLCAFile)),
+      "/etc/ssl/certs/ca-bundle.pem");
+}
+
+TEST(GlutenS3FileSystemTest, doesNotSetSslCaFileConfigByDefault) {
+  auto config = std::make_shared<velox::config::ConfigBase>(std::unordered_map<std::string, std::string>{});
+
+  const auto hiveConfig = createHiveConnectorConfig(config, FileSystemType::kS3);
+
+  EXPECT_FALSE(hiveConfig
+                   ->get<std::string>(filesystems::S3Config::baseConfigKey(filesystems::S3Config::Keys::kSSLCAFile))
+                   .has_value());
+}
+
 } // namespace
 } // namespace gluten
