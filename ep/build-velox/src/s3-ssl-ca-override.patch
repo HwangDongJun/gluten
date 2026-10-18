@@ -1,6 +1,6 @@
 --- a/velox/connectors/hive/storage_adapters/s3fs/S3Config.h
 +++ b/velox/connectors/hive/storage_adapters/s3fs/S3Config.h
-@@ -78,6 +78,7 @@
+@@ -89,6 +89,7 @@ class S3Config {
      kCredentialsProvider,
      kIMDSEnabled,
      kMultipartMinPartSize,
@@ -8,7 +8,7 @@
      kEnd
    };
  
-@@ -119,6 +120,7 @@
+@@ -130,6 +131,7 @@ class S3Config {
              {Keys::kIMDSEnabled, std::make_pair("aws-imds-enabled", "true")},
              {Keys::kMultipartMinPartSize,
               std::make_pair("min-part-size", "10MB")},
@@ -16,7 +16,7 @@
          };
      return config;
    }
-@@ -254,6 +256,15 @@
+@@ -273,6 +275,15 @@ class S3Config {
      return folly::to<bool>(value);
    }
  
@@ -34,15 +34,16 @@
   private:
 --- a/velox/connectors/hive/storage_adapters/s3fs/S3FileSystem.cpp
 +++ b/velox/connectors/hive/storage_adapters/s3fs/S3FileSystem.cpp
-@@ -27,6 +27,7 @@
+@@ -27,6 +27,8 @@
  
  #include <fmt/format.h>
  #include <glog/logging.h>
 +#include <cstdlib>
++#include <filesystem>
  #include <memory>
  #include <stdexcept>
  
-@@ -239,6 +240,25 @@
+@@ -239,6 +241,34 @@ class S3FileSystem::Impl {
          Aws::Client::RequestChecksumCalculation::WHEN_REQUIRED;
      clientConfig.checksumConfig.responseChecksumValidation =
          Aws::Client::ResponseChecksumValidation::WHEN_REQUIRED;
@@ -58,11 +59,20 @@
 +    // variable convention (also respected by OpenSSL, the curl CLI,
 +    // Python, Node.js, etc.), so a runtime image only needs to set one
 +    // environment variable to point at its actual CA bundle location,
-+    // without requiring a Velox/Spark config change.
++    // without requiring a Velox/Spark config change. SSL_CERT_FILE is only
++    // used if it points to an existing regular file; a stale value is
++    // ignored so it cannot break TLS where the compiled-in default path
++    // works.
 +    if (s3Config_->sslCAFile().has_value()) {
 +      clientConfig.caFile = awsString(s3Config_->sslCAFile().value());
 +    } else if (const char* envCAFile = std::getenv("SSL_CERT_FILE")) {
-+      clientConfig.caFile = envCAFile;
++      std::error_code ec;
++      if (std::filesystem::is_regular_file(envCAFile, ec) && !ec) {
++        clientConfig.caFile = envCAFile;
++      } else {
++        LOG(WARNING) << "Ignoring SSL_CERT_FILE='" << envCAFile
++                     << "': not an existing regular file.";
++      }
 +    }
 +
      if (s3Config_->endpoint().has_value()) {
