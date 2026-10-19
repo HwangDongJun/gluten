@@ -102,8 +102,8 @@ in a compile-time default CA bundle path, the RHEL-family location `/etc/pki/tls
 different runtime distribution (e.g. Debian/Ubuntu, where the CA bundle lives at
 `/etc/ssl/certs/ca-certificates.crt`), that path does not exist, the native TLS handshake fails (`curlCode:
 77`), and an internal retry loop kicks in — which looks exactly like a silent hang from Spark's point of view.
-Plain `SSL_CERT_FILE`/`CURL_CA_BUNDLE` environment variables do **not** help on their own, since they are not
-read automatically by the native curl call inside the AWS SDK C++ layer.
+Without the override described below, plain `SSL_CERT_FILE`/`CURL_CA_BUNDLE` environment variables do **not** help,
+since they are not read automatically by the native curl call inside the AWS SDK C++ layer.
 
 **Fix 1 (no rebuild required):** symlink the RHEL-family path to your runtime image's actual CA bundle at image
 build time, e.g. in your Dockerfile:
@@ -124,6 +124,12 @@ spark.hadoop.fs.s3a.ssl.ca-file=/etc/ssl/certs/ca-certificates.crt
 Either setting is passed through to `Aws::Client::ClientConfiguration::caFile`, the AWS SDK C++'s documented
 mechanism for overriding the TLS CA bundle (it flows through to libcurl's `CURLOPT_CAINFO`). If neither is set,
 Velox falls back to the HTTP client's compiled-in default path, preserving existing behavior.
+
+The configured path, whether from `spark.hadoop.fs.s3a.ssl.ca-file` or `SSL_CERT_FILE`, is only used if it points
+to an existing regular file. Otherwise it is ignored with a warning in the executor log and the compiled-in default
+path is used, so a stale value does not affect environments that already work. When both are set,
+`spark.hadoop.fs.s3a.ssl.ca-file` takes precedence, even if the file it points to does not exist. Make sure the
+file exists on every executor.
 
 # Local Caching support
 
