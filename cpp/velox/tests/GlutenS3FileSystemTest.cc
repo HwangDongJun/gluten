@@ -68,8 +68,8 @@ TEST(GlutenS3FileSystemTest, extractsAsyncUploadConfigs) {
 }
 
 TEST(GlutenS3FileSystemTest, extractsSslCaFileConfig) {
-  auto config = std::make_shared<velox::config::ConfigBase>(
-      std::unordered_map<std::string, std::string>{{"spark.hadoop.fs.s3a.ssl.ca-file", "/etc/ssl/certs/ca-bundle.pem"}});
+  auto config = std::make_shared<velox::config::ConfigBase>(std::unordered_map<std::string, std::string>{
+      {"spark.hadoop.fs.s3a.ssl.ca-file", "/etc/ssl/certs/ca-bundle.pem"}});
 
   const auto hiveConfig = createHiveConnectorConfig(config, FileSystemType::kS3);
 
@@ -83,9 +83,9 @@ TEST(GlutenS3FileSystemTest, doesNotSetSslCaFileConfigByDefault) {
 
   const auto hiveConfig = createHiveConnectorConfig(config, FileSystemType::kS3);
 
-  EXPECT_FALSE(hiveConfig
-                   ->get<std::string>(filesystems::S3Config::baseConfigKey(filesystems::S3Config::Keys::kSSLCAFile))
-                   .has_value());
+  EXPECT_FALSE(
+      hiveConfig->get<std::string>(filesystems::S3Config::baseConfigKey(filesystems::S3Config::Keys::kSSLCAFile))
+          .has_value());
 }
 
 } // namespace
