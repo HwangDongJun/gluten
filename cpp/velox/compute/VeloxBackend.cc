@@ -26,6 +26,7 @@
 #include "operators/functions/RegistrationAllFunctions.h"
 #include "operators/plannodes/RowVectorStream.h"
 #include "utils/ConfigExtractor.h"
+#include "utils/TlsTrustStore.h"
 
 #ifdef GLUTEN_ENABLE_QAT
 #include "utils/qat/QatCodec.h"
@@ -186,6 +187,9 @@ void VeloxBackend::init(
   FLAGS_cache_prefetch_min_pct = backendConf_->get<int>(kCachePrefetchMinPct, 0);
 
   hiveConnectorConfig_ = createHiveConnectorConfig(backendConf_);
+
+  // Make sure the statically linked OpenSSL can find trusted certificates before any filesystem creates an HTTP client.
+  ensureTlsTrustStore();
 
   // Setup and register.
   velox::filesystems::registerLocalFileSystem();
