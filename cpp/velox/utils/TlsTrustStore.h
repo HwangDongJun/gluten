@@ -19,6 +19,7 @@
 
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace gluten {
 
@@ -26,13 +27,30 @@ namespace gluten {
 /// trusted certificates at runtime, in this order: the file named by SSL_CERT_FILE (or /etc/ssl/cert.pem when it is not
 /// set), plus the hashed certificate directory named by SSL_CERT_DIR (or /etc/ssl/certs). Some distributions provide
 /// neither (e.g. RHEL 8 family, which keeps its bundle under /etc/pki), which makes every TLS handshake fail.
-///
-/// Returns the path of a well-known system CA bundle that should be used through SSL_CERT_FILE, or std::nullopt when
-/// nothing needs to be done: either OpenSSL already finds trusted certificates, or no well-known bundle exists.
-std::optional<std::string> findFallbackCaBundle();
 
-/// Calls findFallbackCaBundle() and, if it returns a path, exports it as SSL_CERT_FILE. A user-provided SSL_CERT_FILE
-/// that points to an existing file is never changed.
-void ensureTlsTrustStore();
+/// Locations used to decide whether OpenSSL finds trusted certificates, and where to look for a replacement.
+struct TlsSearchPaths {
+  /// OpenSSL's default CA file, used when SSL_CERT_FILE is not set.
+  std::string defaultCaFile;
+  /// OpenSSL's default hashed certificate directory, used when SSL_CERT_DIR is not set.
+  std::string defaultCaDir;
+  /// Well-known system CA bundles, in the order they are tried.
+  std::vector<std::string> bundles;
+};
+
+/// The locations of the running system.
+const TlsSearchPaths& systemTlsSearchPaths();
+
+/// Returns the path of a CA bundle that should be used through SSL_CERT_FILE, or std::nullopt when nothing needs to be
+/// done: either OpenSSL already finds trusted certificates, or none of the bundles in 'paths' exists. 'sslCertFile' and
+/// 'sslCertDir' are the values of the environment variables of the same name, if set.
+std::optional<std::string> findFallbackCaBundle(
+    const std::optional<std::string>& sslCertFile,
+    const std::optional<std::string>& sslCertDir,
+    const TlsSearchPaths& paths);
+
+/// Reads SSL_CERT_FILE and SSL_CERT_DIR from the environment, calls findFallbackCaBundle() and, if it returns a path,
+/// exports it as SSL_CERT_FILE. A SSL_CERT_FILE that points to an existing file is never changed.
+void ensureTlsTrustStore(const TlsSearchPaths& paths = systemTlsSearchPaths());
 
 } // namespace gluten

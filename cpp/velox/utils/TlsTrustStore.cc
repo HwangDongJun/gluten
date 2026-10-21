@@ -28,17 +28,6 @@ namespace {
 
 namespace fs = std::filesystem;
 
-// Bundles of the common distribution families, in the order they are tried.
-constexpr const char* kWellKnownCaBundles[] = {
-    "/etc/ssl/certs/ca-certificates.crt", // Debian, Ubuntu, Alpine
-    "/etc/pki/tls/certs/ca-bundle.crt", // RHEL, CentOS, Rocky, Alma, Fedora
-    "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem", // RHEL family, what the link above points to
-    "/etc/ssl/ca-bundle.pem", // openSUSE
-};
-
-constexpr const char* kOpenSslDefaultCaFile = "/etc/ssl/cert.pem";
-constexpr const char* kOpenSslDefaultCaDir = "/etc/ssl/certs";
-
 bool isRegularFile(const std::string& path) {
   std::error_code ec;
   return fs::is_regular_file(path, ec) && !ec;
@@ -46,6 +35,23 @@ bool isRegularFile(const std::string& path) {
 
 // OpenSSL finds certificates in a directory only through files named <8 hex digits>.<digit>, created by
 // `openssl rehash`.
+bool isHashedCertificateName(const std::string& name) {
+  if (name.size() < 10 || name[8] != '.') {
+    return false;
+  }
+  for (size_t i = 0; i < 8; ++i) {
+    if (!std::isxdigit(static_cast<unsigned char>(name[i]))) {
+      return false;
+    }
+  }
+  for (size_t i = 9; i < name.size(); ++i) {
+    if (!std::isdigit(static_cast<unsigned char>(name[i]))) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool hasHashedCertificate(const std::string& dir) {
   std::error_code ec;
   fs::directory_iterator it(dir, fs::directory_options::skip_permission_denied, ec);
@@ -53,56 +59,62 @@ bool hasHashedCertificate(const std::string& dir) {
     return false;
   }
   for (const auto& entry : it) {
-    const auto name = entry.path().filename().string();
-    if (name.size() < 10 || name[8] != '.') {
-      continue;
-    }
-    bool hex = true;
-    for (size_t i = 0; i < 8; ++i) {
-      hex = hex && std::isxdigit(static_cast<unsigned char>(name[i]));
-    }
-    bool digits = true;
-    for (size_t i = 9; i < name.size(); ++i) {
-      digits = digits && std::isdigit(static_cast<unsigned char>(name[i]));
-    }
-    if (hex && digits) {
+    if (isHashedCertificateName(entry.path().filename().string())) {
       return true;
     }
   }
   return false;
 }
 
+std::optional<std::string> getEnv(const char* name) {
+  const char* value = std::getenv(name);
+  return value != nullptr ? std::optional<std::string>(value) : std::nullopt;
+}
+
 } // namespace
 
-std::optional<std::string> findFallbackCaBundle() {
-  const char* certFile = std::getenv("SSL_CERT_FILE");
-  const char* certDir = std::getenv("SSL_CERT_DIR");
+const TlsSearchPaths& systemTlsSearchPaths() {
+  static const TlsSearchPaths paths{
+      "/etc/ssl/cert.pem",
+      "/etc/ssl/certs",
+      {
+          "/etc/ssl/certs/ca-certificates.crt", // Debian, Ubuntu, Alpine
+          "/etc/pki/tls/certs/ca-bundle.crt", // RHEL, CentOS, Rocky, Alma, Fedora
+          "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem", // RHEL family, what the link above points to
+          "/etc/ssl/ca-bundle.pem", // openSUSE
+      }};
+  return paths;
+}
 
+std::optional<std::string> findFallbackCaBundle(
+    const std::optional<std::string>& sslCertFile,
+    const std::optional<std::string>& sslCertDir,
+    const TlsSearchPaths& paths) {
   // OpenSSL does not fall back to its default file when SSL_CERT_FILE is set but unusable.
-  const bool fileUsable = certFile != nullptr ? isRegularFile(certFile) : isRegularFile(kOpenSslDefaultCaFile);
+  const bool fileUsable = isRegularFile(sslCertFile.value_or(paths.defaultCaFile));
   if (fileUsable) {
     return std::nullopt;
   }
-  if (hasHashedCertificate(certDir != nullptr ? certDir : kOpenSslDefaultCaDir)) {
+  if (hasHashedCertificate(sslCertDir.value_or(paths.defaultCaDir))) {
     return std::nullopt;
   }
 
-  for (const char* candidate : kWellKnownCaBundles) {
+  for (const auto& candidate : paths.bundles) {
     if (isRegularFile(candidate)) {
-      return std::string(candidate);
+      return candidate;
     }
   }
   return std::nullopt;
 }
 
-void ensureTlsTrustStore() {
-  const auto bundle = findFallbackCaBundle();
+void ensureTlsTrustStore(const TlsSearchPaths& paths) {
+  const auto previous = getEnv("SSL_CERT_FILE");
+  const auto bundle = findFallbackCaBundle(previous, getEnv("SSL_CERT_DIR"), paths);
   if (!bundle.has_value()) {
     return;
   }
-  const char* previous = std::getenv("SSL_CERT_FILE");
-  if (previous != nullptr) {
-    LOG(WARNING) << "SSL_CERT_FILE='" << previous << "' is not an existing file; using '" << bundle.value()
+  if (previous.has_value()) {
+    LOG(WARNING) << "SSL_CERT_FILE='" << previous.value() << "' is not an existing file; using '" << bundle.value()
                  << "' instead.";
   } else {
     LOG(INFO) << "No trusted certificates found at the OpenSSL default locations; using '" << bundle.value()

@@ -18,6 +18,7 @@
 #include "utils/TlsTrustStore.h"
 
 #include <gtest/gtest.h>
+#include <unistd.h>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -28,6 +29,7 @@ namespace {
 
 namespace fs = std::filesystem;
 
+// All locations are inside a temporary directory, so the result never depends on the CA files of the host.
 class TlsTrustStoreTest : public ::testing::Test {
  protected:
   void SetUp() override {
@@ -35,24 +37,35 @@ class TlsTrustStoreTest : public ::testing::Test {
     saveEnv("SSL_CERT_DIR", savedDir_);
     ::unsetenv("SSL_CERT_FILE");
     ::unsetenv("SSL_CERT_DIR");
-    dir_ = fs::temp_directory_path() / ("gluten_tls_trust_store_test_" + std::to_string(::getpid()));
-    fs::remove_all(dir_);
-    fs::create_directories(dir_);
+
+    root_ = fs::temp_directory_path() / ("gluten_tls_trust_store_test_" + std::to_string(::getpid()));
+    fs::remove_all(root_);
+    fs::create_directories(root_ / "certs");
+
+    paths_.defaultCaFile = (root_ / "cert.pem").string();
+    paths_.defaultCaDir = (root_ / "certs").string();
+    paths_.bundles = {(root_ / "debian.crt").string(), (root_ / "rhel.crt").string()};
   }
 
   void TearDown() override {
     restoreEnv("SSL_CERT_FILE", savedFile_);
     restoreEnv("SSL_CERT_DIR", savedDir_);
-    fs::remove_all(dir_);
+    fs::remove_all(root_);
   }
 
-  std::string touch(const std::string& name) {
-    const auto path = dir_ / name;
+  std::string touch(const fs::path& path) {
     std::ofstream(path) << "x";
     return path.string();
   }
 
-  fs::path dir_;
+  std::optional<std::string> find(
+      const std::optional<std::string>& sslCertFile = std::nullopt,
+      const std::optional<std::string>& sslCertDir = std::nullopt) {
+    return findFallbackCaBundle(sslCertFile, sslCertDir, paths_);
+  }
+
+  fs::path root_;
+  TlsSearchPaths paths_;
 
  private:
   static void saveEnv(const char* name, std::optional<std::string>& out) {
@@ -72,57 +85,111 @@ class TlsTrustStoreTest : public ::testing::Test {
   std::optional<std::string> savedDir_;
 };
 
-TEST_F(TlsTrustStoreTest, existingSslCertFileIsKept) {
-  ::setenv("SSL_CERT_FILE", touch("bundle.pem").c_str(), 1);
-  EXPECT_EQ(findFallbackCaBundle(), std::nullopt);
-
-  const std::string before = std::getenv("SSL_CERT_FILE");
-  ensureTlsTrustStore();
-  EXPECT_EQ(std::string(std::getenv("SSL_CERT_FILE")), before);
+TEST_F(TlsTrustStoreTest, noBundleAnywhereMeansNothingToDo) {
+  EXPECT_EQ(find(), std::nullopt);
 }
 
-TEST_F(TlsTrustStoreTest, hashedCertificateDirectoryIsEnough) {
-  // A missing SSL_CERT_FILE is not replaced when the hashed directory already provides certificates.
-  ::setenv("SSL_CERT_FILE", (dir_ / "missing.pem").c_str(), 1);
-  const auto certs = dir_ / "certs";
-  fs::create_directories(certs);
-  std::ofstream(certs / "0a1b2c3d.0") << "x";
-  ::setenv("SSL_CERT_DIR", certs.c_str(), 1);
-  EXPECT_EQ(findFallbackCaBundle(), std::nullopt);
+TEST_F(TlsTrustStoreTest, defaultCaFileIsEnough) {
+  touch(root_ / "cert.pem");
+  touch(root_ / "debian.crt");
+  EXPECT_EQ(find(), std::nullopt);
 }
 
-TEST_F(TlsTrustStoreTest, nonHashedFilesDoNotCount) {
-  // Files that OpenSSL would not pick up from a directory (not <8 hex>.<digit>) are not trusted certificates.
-  ::setenv("SSL_CERT_FILE", (dir_ / "missing.pem").c_str(), 1);
-  const auto certs = dir_ / "certs";
-  fs::create_directories(certs);
-  std::ofstream(certs / "ca-certificates.crt") << "x";
-  std::ofstream(certs / "0a1b2c3z.0") << "x";
-  std::ofstream(certs / "0a1b2c3d.pem") << "x";
-  ::setenv("SSL_CERT_DIR", certs.c_str(), 1);
-
-  const auto bundle = findFallbackCaBundle();
-  // The result depends on the host: either one of the well-known system bundles, or nothing when the host has none
-  // (or already has a usable /etc/ssl/cert.pem, which cannot be seen here because SSL_CERT_FILE is set).
-  if (bundle.has_value()) {
-    EXPECT_TRUE(fs::is_regular_file(bundle.value()));
-  }
+TEST_F(TlsTrustStoreTest, existingSslCertFileIsEnough) {
+  touch(root_ / "debian.crt");
+  EXPECT_EQ(find(touch(root_ / "mine.pem")), std::nullopt);
 }
 
-TEST_F(TlsTrustStoreTest, unusableSslCertFileIsReplacedWhenSystemBundleExists) {
-  ::setenv("SSL_CERT_FILE", (dir_ / "missing.pem").c_str(), 1);
-  ::setenv("SSL_CERT_DIR", (dir_ / "empty").c_str(), 1);
+TEST_F(TlsTrustStoreTest, hashedCertificateInDefaultDirectoryIsEnough) {
+  touch(root_ / "debian.crt");
+  touch(root_ / "certs" / "0a1b2c3d.0");
+  EXPECT_EQ(find(), std::nullopt);
+}
 
-  const auto bundle = findFallbackCaBundle();
-  ensureTlsTrustStore();
-  const std::string now = std::getenv("SSL_CERT_FILE");
-  if (bundle.has_value()) {
-    EXPECT_EQ(now, bundle.value());
-    EXPECT_TRUE(fs::is_regular_file(now));
-  } else {
-    // No well-known bundle on this host: the value is left untouched.
-    EXPECT_EQ(now, (dir_ / "missing.pem").string());
-  }
+TEST_F(TlsTrustStoreTest, hashedCertificateIsEnoughEvenWhenSslCertFileIsMissing) {
+  // OpenSSL still loads the hashed directory, so there is nothing to replace.
+  touch(root_ / "debian.crt");
+  touch(root_ / "certs" / "0a1b2c3d.0");
+  EXPECT_EQ(find((root_ / "missing.pem").string()), std::nullopt);
+}
+
+TEST_F(TlsTrustStoreTest, sslCertDirOverridesDefaultDirectory) {
+  touch(root_ / "debian.crt");
+  touch(root_ / "certs" / "0a1b2c3d.0");
+  fs::create_directories(root_ / "empty");
+  // The default directory has a hashed certificate, but SSL_CERT_DIR points to an empty one.
+  EXPECT_EQ(find(std::nullopt, (root_ / "empty").string()), (root_ / "debian.crt").string());
+  // And the other way round.
+  fs::create_directories(root_ / "mine");
+  touch(root_ / "mine" / "ffffffff.12");
+  EXPECT_EQ(find(std::nullopt, (root_ / "mine").string()), std::nullopt);
+}
+
+TEST_F(TlsTrustStoreTest, filesThatOpenSslDoesNotPickUpDoNotCount) {
+  touch(root_ / "rhel.crt");
+  touch(root_ / "certs" / "ca-certificates.crt");
+  touch(root_ / "certs" / "0a1b2c3z.0"); // not hex
+  touch(root_ / "certs" / "0a1b2c3d.pem"); // not a digit suffix
+  touch(root_ / "certs" / "0a1b2c3.0"); // too short
+  EXPECT_EQ(find(), (root_ / "rhel.crt").string());
+}
+
+TEST_F(TlsTrustStoreTest, bundlesAreTriedInOrder) {
+  touch(root_ / "debian.crt");
+  touch(root_ / "rhel.crt");
+  EXPECT_EQ(find(), (root_ / "debian.crt").string());
+
+  fs::remove(root_ / "debian.crt");
+  EXPECT_EQ(find(), (root_ / "rhel.crt").string());
+}
+
+TEST_F(TlsTrustStoreTest, missingSslCertFileIsReplaced) {
+  // OpenSSL does not fall back to its default file when SSL_CERT_FILE is set, so cert.pem does not help here.
+  touch(root_ / "cert.pem");
+  touch(root_ / "rhel.crt");
+  EXPECT_EQ(find((root_ / "missing.pem").string()), (root_ / "rhel.crt").string());
+}
+
+TEST_F(TlsTrustStoreTest, directoryIsNotAFile) {
+  fs::create_directories(root_ / "debian.crt");
+  touch(root_ / "rhel.crt");
+  EXPECT_EQ(find(), (root_ / "rhel.crt").string());
+}
+
+TEST_F(TlsTrustStoreTest, ensureExportsTheBundle) {
+  touch(root_ / "rhel.crt");
+  ensureTlsTrustStore(paths_);
+  ASSERT_NE(std::getenv("SSL_CERT_FILE"), nullptr);
+  EXPECT_EQ(std::string(std::getenv("SSL_CERT_FILE")), (root_ / "rhel.crt").string());
+}
+
+TEST_F(TlsTrustStoreTest, ensureReplacesAMissingSslCertFile) {
+  touch(root_ / "debian.crt");
+  ::setenv("SSL_CERT_FILE", (root_ / "missing.pem").c_str(), 1);
+  ensureTlsTrustStore(paths_);
+  EXPECT_EQ(std::string(std::getenv("SSL_CERT_FILE")), (root_ / "debian.crt").string());
+}
+
+TEST_F(TlsTrustStoreTest, ensureKeepsAnExistingSslCertFile) {
+  touch(root_ / "debian.crt");
+  const auto mine = touch(root_ / "mine.pem");
+  ::setenv("SSL_CERT_FILE", mine.c_str(), 1);
+  ensureTlsTrustStore(paths_);
+  EXPECT_EQ(std::string(std::getenv("SSL_CERT_FILE")), mine);
+}
+
+TEST_F(TlsTrustStoreTest, ensureLeavesTheEnvironmentAloneWhenNothingIsFound) {
+  ensureTlsTrustStore(paths_);
+  EXPECT_EQ(std::getenv("SSL_CERT_FILE"), nullptr);
+}
+
+TEST_F(TlsTrustStoreTest, ensureHonorsSslCertDirFromTheEnvironment) {
+  touch(root_ / "debian.crt");
+  fs::create_directories(root_ / "mine");
+  touch(root_ / "mine" / "0a1b2c3d.0");
+  ::setenv("SSL_CERT_DIR", (root_ / "mine").c_str(), 1);
+  ensureTlsTrustStore(paths_);
+  EXPECT_EQ(std::getenv("SSL_CERT_FILE"), nullptr);
 }
 
 } // namespace
