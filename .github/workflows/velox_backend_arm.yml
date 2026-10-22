@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Control run for the ARM TPC failure seen on verify/12711-ca-autodetect: main plus this comment only.
 name: Velox Backend (ARM)
 
 on:
