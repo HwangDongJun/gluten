@@ -19,7 +19,9 @@
 
 #include <glog/logging.h>
 #include <cctype>
+#include <cerrno>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 
 namespace gluten {
@@ -74,6 +76,11 @@ std::optional<std::string> getEnv(const char* name) {
 } // namespace
 
 const TlsSearchPaths& systemTlsSearchPaths() {
+  // OpenSSL's defaults are fixed when it is built. The vcpkg openssl port used for the native libraries is configured
+  // with --openssldir=/etc/ssl, which gives the two paths below. They are written out here instead of being read from
+  // the library (X509_get_default_cert_file() and X509_get_default_cert_dir()) because no Gluten source includes the
+  // OpenSSL headers yet and the OpenSSL include path is only set up for some build configurations. If the openssl
+  // port is ever built with another openssldir, update them.
   static const TlsSearchPaths paths{
       "/etc/ssl/cert.pem",
       "/etc/ssl/certs",
@@ -113,6 +120,12 @@ void ensureTlsTrustStore(const TlsSearchPaths& paths) {
   if (!bundle.has_value()) {
     return;
   }
+  // Only report the new value once it is in place.
+  if (::setenv("SSL_CERT_FILE", bundle->c_str(), 1) != 0) {
+    LOG(ERROR) << "Failed to set SSL_CERT_FILE to '" << bundle.value() << "': " << std::strerror(errno)
+               << ". TLS connections made by the native S3, GCS and ABFS clients may fail.";
+    return;
+  }
   if (previous.has_value()) {
     LOG(WARNING) << "SSL_CERT_FILE='" << previous.value() << "' is not an existing file; using '" << bundle.value()
                  << "' instead.";
@@ -120,7 +133,6 @@ void ensureTlsTrustStore(const TlsSearchPaths& paths) {
     LOG(INFO) << "No trusted certificates found at the OpenSSL default locations; using '" << bundle.value()
               << "' as SSL_CERT_FILE.";
   }
-  ::setenv("SSL_CERT_FILE", bundle->c_str(), 1);
 }
 
 } // namespace gluten
