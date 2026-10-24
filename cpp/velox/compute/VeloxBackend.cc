@@ -158,6 +158,11 @@ void VeloxBackend::init(
   FLAGS_logtostderr = true;
   google::InitGoogleLogging("gluten");
 
+  // Make sure the statically linked OpenSSL can find trusted certificates before any filesystem creates an HTTP client.
+  // This may call setenv(), which is not safe against concurrent getenv()/setenv() calls from other threads, so it is
+  // done here, once per process, before the memory manager, the filesystems and the other components are set up.
+  ensureTlsTrustStore();
+
   globalMemoryManager_ = std::make_unique<VeloxMemoryManager>(kVeloxBackendKind, std::move(listener), *backendConf_);
 
   // Register factories.
@@ -191,9 +196,6 @@ void VeloxBackend::init(
   FLAGS_cache_prefetch_min_pct = backendConf_->get<int>(kCachePrefetchMinPct, 0);
 
   hiveConnectorConfig_ = createHiveConnectorConfig(backendConf_);
-
-  // Make sure the statically linked OpenSSL can find trusted certificates before any filesystem creates an HTTP client.
-  ensureTlsTrustStore();
 
   // Setup and register.
   velox::filesystems::registerLocalFileSystem();
