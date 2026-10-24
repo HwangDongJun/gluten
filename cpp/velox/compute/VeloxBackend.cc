@@ -26,6 +26,11 @@
 #include "operators/functions/RegistrationAllFunctions.h"
 #include "operators/plannodes/RowVectorStream.h"
 #include "utils/ConfigExtractor.h"
+#include "utils/TlsTrustStore.h"
+
+#ifdef ENABLE_KAFKA
+#include "operators/reader/KafkaConnector.h"
+#endif
 
 #ifdef GLUTEN_ENABLE_QAT
 #include "utils/qat/QatCodec.h"
@@ -186,6 +191,9 @@ void VeloxBackend::init(
   FLAGS_cache_prefetch_min_pct = backendConf_->get<int>(kCachePrefetchMinPct, 0);
 
   hiveConnectorConfig_ = createHiveConnectorConfig(backendConf_);
+
+  // Make sure the statically linked OpenSSL can find trusted certificates before any filesystem creates an HTTP client.
+  ensureTlsTrustStore();
 
   // Setup and register.
   velox::filesystems::registerLocalFileSystem();
@@ -425,6 +433,13 @@ std::shared_ptr<facebook::velox::connector::Connector> VeloxBackend::createValue
     bool dynamicFilterEnabled) const {
   return std::make_shared<ValueStreamConnector>(connectorId, hiveConnectorConfig_, dynamicFilterEnabled);
 }
+
+#ifdef ENABLE_KAFKA
+std::shared_ptr<facebook::velox::connector::Connector> VeloxBackend::createKafkaConnector(
+    const std::string& connectorId) const {
+  return std::make_shared<KafkaConnector>(connectorId, hiveConnectorConfig_);
+}
+#endif
 
 #ifdef GLUTEN_ENABLE_GPU
 std::shared_ptr<facebook::velox::connector::Connector> VeloxBackend::createCudfHiveConnector(
