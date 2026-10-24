@@ -18,6 +18,7 @@
 #include "utils/TlsTrustStore.h"
 
 #include <glog/logging.h>
+#include <openssl/x509.h>
 #include <cctype>
 #include <cerrno>
 #include <cstdlib>
@@ -76,14 +77,12 @@ std::optional<std::string> getEnv(const char* name) {
 } // namespace
 
 const TlsSearchPaths& systemTlsSearchPaths() {
-  // OpenSSL's defaults are fixed when it is built. The vcpkg openssl port used for the native libraries is configured
-  // with --openssldir=/etc/ssl, which gives the two paths below. They are written out here instead of being read from
-  // the library (X509_get_default_cert_file() and X509_get_default_cert_dir()) because no Gluten source includes the
-  // OpenSSL headers yet and the OpenSSL include path is only set up for some build configurations. If the openssl
-  // port is ever built with another openssldir, update them.
+  // OpenSSL's default locations are fixed when OpenSSL is built (--openssldir). They are /etc/ssl for the statically
+  // linked vcpkg OpenSSL but can differ for the system OpenSSL of a VCPKG_DYNAMIC_OPENSSL=ON build, so ask the library
+  // that is actually linked instead of assuming them.
   static const TlsSearchPaths paths{
-      "/etc/ssl/cert.pem",
-      "/etc/ssl/certs",
+      X509_get_default_cert_file(),
+      X509_get_default_cert_dir(),
       {
           "/etc/ssl/certs/ca-certificates.crt", // Debian, Ubuntu, Alpine
           "/etc/pki/tls/certs/ca-bundle.crt", // RHEL, CentOS, Rocky, Alma, Fedora

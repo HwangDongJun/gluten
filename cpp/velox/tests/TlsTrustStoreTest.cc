@@ -156,6 +156,16 @@ TEST_F(TlsTrustStoreTest, directoryIsNotAFile) {
   EXPECT_EQ(find(), (root_ / "rhel.crt").string());
 }
 
+TEST_F(TlsTrustStoreTest, systemSearchPathsComeFromTheLinkedOpenSsl) {
+  // The defaults are read from the OpenSSL that is linked, not assumed, so they are never empty and are absolute.
+  const auto& system = systemTlsSearchPaths();
+  EXPECT_FALSE(system.defaultCaFile.empty());
+  EXPECT_FALSE(system.defaultCaDir.empty());
+  EXPECT_EQ(system.defaultCaFile.front(), '/');
+  EXPECT_EQ(system.defaultCaDir.front(), '/');
+  EXPECT_FALSE(system.bundles.empty());
+}
+
 TEST_F(TlsTrustStoreTest, ensureExportsTheBundle) {
   touch(root_ / "rhel.crt");
   ensureTlsTrustStore(paths_);
