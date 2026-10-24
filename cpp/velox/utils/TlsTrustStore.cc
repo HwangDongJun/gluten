@@ -115,7 +115,11 @@ std::optional<std::string> findFallbackCaBundle(
 
 void ensureTlsTrustStore(const TlsSearchPaths& paths) {
   const auto previous = getEnv("SSL_CERT_FILE");
-  const auto bundle = findFallbackCaBundle(previous, getEnv("SSL_CERT_DIR"), paths);
+  const auto certDir = getEnv("SSL_CERT_DIR");
+  // Shown with --v=1 or higher; lets one see which locations the decision below was based on.
+  VLOG(1) << "OpenSSL default certificate file '" << paths.defaultCaFile << "' and directory '" << paths.defaultCaDir
+          << "'; SSL_CERT_FILE=" << previous.value_or("<unset>") << ", SSL_CERT_DIR=" << certDir.value_or("<unset>");
+  const auto bundle = findFallbackCaBundle(previous, certDir, paths);
   if (!bundle.has_value()) {
     return;
   }
