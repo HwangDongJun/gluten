@@ -91,6 +91,8 @@ object VeloxBackend {
 }
 
 object VeloxBackendSettings extends BackendSettingsApi {
+  override def supportNativeIncrementMetric(): Boolean = true
+
   val SHUFFLE_SUPPORTED_CODEC = Set("lz4", "zstd")
   val GLUTEN_VELOX_UDF_LIB_PATHS = VeloxBackend.CONF_PREFIX + ".udfLibraryPaths"
   val GLUTEN_VELOX_DRIVER_UDF_LIB_PATHS = VeloxBackend.CONF_PREFIX + ".driver.udfLibraryPaths"
@@ -266,7 +268,8 @@ object VeloxBackendSettings extends BackendSettingsApi {
     val validationChecks = Seq(
       validateScheme(),
       validateFormats(),
-      validateMetadata(),
+      // Skip the storage I/O of the root-path pre-check when the validation is off.
+      if (GlutenConfig.get.parquetMetadataValidationEnabled) validateMetadata() else None,
       validateDataSchema()
     )
 
